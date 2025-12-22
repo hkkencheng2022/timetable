@@ -20,12 +20,15 @@ from reportlab.pdfbase.ttfonts import TTFont
 st.set_page_config(page_title="Interview Scheduler", layout="wide", page_icon="🕒")
 conn = st.connection("gsheets", type=GSheetsConnection)
 
-# ================= TIME SLOT GENERATOR =================
+# ================= CONSTANTS =================
 # Time range: 09:00 AM to 12:00 AM (24:00)
 TIME_SLOTS = []
 for h in range(9, 24):  # 9 to 23
     for m in (0, 30):
         TIME_SLOTS.append(f"{h:02d}:{m:02d}")
+
+# 科目清單 (Subject List)
+SUBJECT_OPTIONS = ["中文", "英文", "數學", "生物", "地理", "中史", "歷史", "物理", "化學"]
 
 # ================= DATA FUNCTIONS =================
 def clean_dataframe(df):
@@ -234,7 +237,7 @@ def generate_visual_excel(df):
 initialize_session()
 df = st.session_state.data
 
-st.title("🕒 Cloud Interview Scheduler")
+st.title("🕒 Cloud Scheduler (多人協作優化版)")
 
 if not df.empty and 'LastUpdated' in df.columns:
     max_ts = df['LastUpdated'].max()
@@ -285,15 +288,18 @@ with tab2:
 
         with st.form("add", clear_on_submit=False):
             form_id = st.session_state.form_id
-            name = st.text_input("Name", key=f"name_{form_id}")
-            c_id = st.text_input("ID", key=f"id_{form_id}")
+            
+            # 使用下拉選單選擇科目
+            name = st.selectbox("科目 (Subject)", SUBJECT_OPTIONS, key=f"name_{form_id}")
+            
+            c_id = st.text_input("ID / Class", key=f"id_{form_id}")
             d = st.date_input("Date", min_value=datetime.today(), key=f"date_{form_id}")
             t_str = st.selectbox("Time", TIME_SLOTS, key=f"time_{form_id}")
             notes = st.text_area("Notes", key=f"notes_{form_id}")
             
             if st.form_submit_button("Save"):
                 if not name:
-                    st.error("Name required")
+                    st.error("Name/Subject required")
                 else:
                     limit_reached = False
                     if limit > 0:
@@ -326,6 +332,14 @@ with tab2:
             use_container_width=True,
             hide_index=True,
             column_config={
+                # 設定 Name 欄位在表格編輯時也顯示為下拉選單
+                "Name": st.column_config.SelectboxColumn(
+                    "科目 (Subject)",
+                    help="選擇科目",
+                    width="medium",
+                    options=SUBJECT_OPTIONS,
+                    required=True,
+                ),
                 "Time": st.column_config.TimeColumn("Time", format="HH:mm", step=1800),
                 "LastUpdated": None  # Hide
             }
