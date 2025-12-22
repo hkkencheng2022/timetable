@@ -1,5 +1,3 @@
---- START OF FILE app.py ---
-
 import streamlit as st
 from streamlit_gsheets import GSheetsConnection
 from streamlit_calendar import calendar
@@ -23,9 +21,9 @@ st.set_page_config(page_title="Interview Scheduler", layout="wide", page_icon="�
 conn = st.connection("gsheets", type=GSheetsConnection)
 
 # ================= TIME SLOT GENERATOR =================
-# 更新時間範圍：09:00 AM 至 12:00 AM (24:00)
+# Time range: 09:00 AM to 12:00 AM (24:00)
 TIME_SLOTS = []
-for h in range(9, 24):  # 9 點到 23 點
+for h in range(9, 24):  # 9 to 23
     for m in (0, 30):
         TIME_SLOTS.append(f"{h:02d}:{m:02d}")
 
@@ -79,7 +77,7 @@ def refresh_data(force=False):
     if force:
         st.rerun()
 
-# ================= 衝突檢測與合併保存 =================
+# ================= CONFLICT DETECTION & SAVE =================
 def save_with_conflict_detection(new_df):
     try:
         latest_cloud = load_data_from_google()
@@ -88,16 +86,16 @@ def save_with_conflict_detection(new_df):
         current_time = pd.Timestamp.now()
         
         if pd.notna(user_latest_ts) and pd.notna(cloud_latest_ts) and cloud_latest_ts > user_latest_ts:
-            st.error("⚠️ 檢測到其他人已修改資料！")
-            st.write("雲端最新更新時間：", cloud_latest_ts)
-            st.write("您載入時的時間：", user_latest_ts)
+            st.error("⚠️ Detected external changes!")
+            st.write("Cloud Last Update:", cloud_latest_ts)
+            st.write("Your Load Time:", user_latest_ts)
             
             col1, col2 = st.columns(2)
-            if col1.button("🔄 放棄我的修改，重新載入最新資料"):
+            if col1.button("🔄 Discard my changes & Reload"):
                 refresh_data(force=True)
                 return
-            if col2.button("⚠️ 強制覆蓋（可能遺失他人修改）", type="primary"):
-                pass  # 繼續保存
+            if col2.button("⚠️ Force Overwrite (Risk losing others' data)", type="primary"):
+                pass  # Continue to save
             else:
                 st.stop()
         
@@ -116,7 +114,7 @@ def save_with_conflict_detection(new_df):
         else:
             st.error(f"Save failed: {e}")
 
-# ================= EXPORT FUNCTIONS (保持原樣) =================
+# ================= EXPORT FUNCTIONS =================
 def generate_visual_pdf(df):
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), topMargin=30, bottomMargin=30)
@@ -236,14 +234,14 @@ def generate_visual_excel(df):
 initialize_session()
 df = st.session_state.data
 
-st.title("🕒 Cloud Interview Scheduler（多人協作優化版）")
+st.title("🕒 Cloud Interview Scheduler")
 
 if not df.empty and 'LastUpdated' in df.columns:
     max_ts = df['LastUpdated'].max()
     if pd.notna(max_ts):
-        st.caption(f"📅 資料最後更新時間：{max_ts.strftime('%Y-%m-%d %H:%M:%S')}")
+        st.caption(f"📅 Last Updated: {max_ts.strftime('%Y-%m-%d %H:%M:%S')}")
 
-st.warning("⚠️ **多人同時編輯時，請先點「🔄 Force Sync」確認最新資料，避免互相覆蓋！**")
+st.warning("⚠️ **For multi-user editing, please click '🔄 Force Sync' first to avoid overwriting others' data!**")
 
 if st.button("🔄 Force Sync from Cloud"):
     refresh_data(force=True)
@@ -329,7 +327,7 @@ with tab2:
             hide_index=True,
             column_config={
                 "Time": st.column_config.TimeColumn("Time", format="HH:mm", step=1800),
-                "LastUpdated": None  # 隱藏
+                "LastUpdated": None  # Hide
             }
         )
         
@@ -356,7 +354,7 @@ with tab3:
             try:
                 imp = pd.read_csv(up).fillna("")
                 if 'Name' in imp.columns:
-                    # 匯入時也加上 LastUpdated
+                    # Add LastUpdated on import
                     imp['LastUpdated'] = pd.NaT
                     save_with_conflict_detection(pd.concat([df, imp], ignore_index=True))
                     st.success("Imported!")
