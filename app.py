@@ -1,0 +1,365 @@
+--- START OF FILE app.py ---
+
+import streamlit as st
+from streamlit_gsheets import GSheetsConnection
+from streamlit_calendar import calendar
+import pandas as pd
+from datetime import datetime
+import io
+import os
+
+# PDF/Excel Libraries
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+from reportlab.lib import colors
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, Font, Border, Side, PatternFill
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+
+# ================= CONFIGURATION =================
+st.set_page_config(page_title="Interview Scheduler", layout="wide", page_icon="🕒")
+conn = st.connection("gsheets", type=GSheetsConnection)
+
+# ================= TIME SLOT GENERATOR =================
+# 更新時間範圍：09:00 AM 至 12:00 AM (24:00)
+TIME_SLOTS = []
+for h in range(9, 24):  # 9 點到 23 點
+    for m in (0, 30):
+        TIME_SLOTS.append(f"{h:02d}:{m:02d}")
+
+# ================= DATA FUNCTIONS =================
+def clean_dataframe(df):
+    df = df.astype(str)
+    for col in df.columns:
+        if col not in ['LastUpdated']:
+            df[col] = df[col].replace(['NaT', 'nan', 'None', '<NA>'], '')
+    df['Date'] = pd.to_datetime(df['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
+    df['Time'] = pd.to_datetime(df['Time'], format='%H:%M:00', errors='coerce').fillna(
+                 pd.to_datetime(df['Time'], format='%H:%M', errors='coerce')
+                 ).dt.strftime('%H:%M')
+    df = df.fillna("")
+    if 'LastUpdated' not in df.columns:
+        df['LastUpdated'] = pd.NaT
+    df['LastUpdated'] = pd.to_datetime(df['LastUpdated'], errors='coerce')
+    return df
+
+def load_data_from_google():
+    try:
+        df = conn.read(worksheet="Sheet1", ttl=0)
+        if df.empty:
+            return pd.DataFrame(columns=["Name", "ID", "Date", "Time", "Notes", "LastUpdated"])
+        return clean_dataframe(df)
+    except Exception as e:
+        if "429" in str(e):
+            st.error("⚠️ Too many requests! Please wait 1 minute before refreshing.")
+        else:
+            st.error(f"Database Error: {e}")
+        return pd.DataFrame(columns=["Name", "ID", "Date", "Time", "Notes", "LastUpdated"])
+
+def initialize_session():
+    if 'data' not in st.session_state:
+        with st.spinner("🔄 Connecting to Cloud Database..."):
+            st.session_state.data = load_data_from_google()
+        st.rerun()
+    
+    if 'form_id' not in st.session_state:
+        st.session_state.form_id = 0
+    if 'last_cloud_timestamp' not in st.session_state:
+        st.session_state.last_cloud_timestamp = None
+
+def refresh_data(force=False):
+    new_data = load_data_from_google()
+    st.session_state.data = new_data
+    if not new_data.empty and 'LastUpdated' in new_data.columns:
+        max_ts = new_data['LastUpdated'].max()
+        st.session_state.last_cloud_timestamp = max_ts
+    st.toast("Data refreshed from Cloud", icon="🔄")
+    if force:
+        st.rerun()
+
+# ================= 衝突檢測與合併保存 =================
+def save_with_conflict_detection(new_df):
+    try:
+        latest_cloud = load_data_from_google()
+        cloud_latest_ts = latest_cloud['LastUpdated'].max() if not latest_cloud.empty else pd.NaT
+        user_latest_ts = st.session_state.last_cloud_timestamp
+        current_time = pd.Timestamp.now()
+        
+        if pd.notna(user_latest_ts) and pd.notna(cloud_latest_ts) and cloud_latest_ts > user_latest_ts:
+            st.error("⚠️ 檢測到其他人已修改資料！")
+            st.write("雲端最新更新時間：", cloud_latest_ts)
+            st.write("您載入時的時間：", user_latest_ts)
+            
+            col1, col2 = st.columns(2)
+            if col1.button("🔄 放棄我的修改，重新載入最新資料"):
+                refresh_data(force=True)
+                return
+            if col2.button("⚠️ 強制覆蓋（可能遺失他人修改）", type="primary"):
+                pass  # 繼續保存
+            else:
+                st.stop()
+        
+        clean_df = clean_dataframe(new_df.copy())
+        clean_df['LastUpdated'] = current_time
+        
+        conn.update(worksheet="Sheet1", data=clean_df)
+        st.session_state.data = clean_df
+        st.session_state.last_cloud_timestamp = current_time
+        st.success("✅ Saved successfully!")
+        st.rerun()
+        
+    except Exception as e:
+        if "429" in str(e):
+            st.error("⚠️ Save failed: Too many requests. Wait 60 seconds and try again.")
+        else:
+            st.error(f"Save failed: {e}")
+
+# ================= EXPORT FUNCTIONS (保持原樣) =================
+def generate_visual_pdf(df):
+    buffer = io.BytesIO()
+    doc = SimpleDocTemplate(buffer, pagesize=landscape(A4), topMargin=30, bottomMargin=30)
+    elements = []
+    font_name = "Helvetica"
+    try:
+        if os.path.exists("font.ttf"):
+            pdfmetrics.registerFont(TTFont('CustomChinese', 'font.ttf'))
+            font_name = 'CustomChinese'
+        elif os.path.exists("font.otf"):
+            pdfmetrics.registerFont(TTFont('CustomChinese', 'font.otf'))
+            font_name = 'CustomChinese'
+    except Exception as e:
+        print(f"Font loading error: {e}")
+
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle('ChineseTitle', parent=styles['Heading1'], fontName=font_name, fontSize=16, leading=20)
+    cell_style = ParagraphStyle('ChineseCell', parent=styles['Normal'], fontName=font_name, fontSize=9, leading=11)
+    
+    df['dt'] = pd.to_datetime(df['Date'] + " " + df['Time'], errors='coerce')
+    df = df.dropna(subset=['dt'])
+    months = sorted(df['dt'].dt.to_period('M').unique())
+    import calendar as py_calendar
+    cal = py_calendar.Calendar(firstweekday=6)
+
+    for period in months:
+        year, month = period.year, period.month
+        elements.append(Paragraph(f"<b>{period.strftime('%B %Y')}</b>", title_style))
+        elements.append(Spacer(1, 10))
+        
+        month_cal = cal.monthdayscalendar(year, month)
+        table_data = [["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]]
+        row_heights = [20]
+
+        for week in month_cal:
+            row_cells = []
+            max_entries = 0
+            for day in week:
+                if day == 0:
+                    row_cells.append("")
+                else:
+                    day_str = f"{year}-{month:02d}-{day:02d}"
+                    day_data = df[df['Date'] == day_str].sort_values('Time')
+                    cell_text = f"<b>{day}</b>"
+                    if not day_data.empty:
+                        lines = [f"{r['Name']}\n{r['Time']}" for _, r in day_data.iterrows()]
+                        cell_text += "\n\n" + "\n".join(lines)
+                        max_entries = max(max_entries, len(day_data))
+                    row_cells.append(Paragraph(cell_text.replace("\n", "<br/>"), cell_style))
+            table_data.append(row_cells)
+            row_heights.append(40 + (max_entries * 25))
+
+        table = Table(table_data, colWidths=[110]*7, rowHeights=row_heights)
+        table.setStyle(TableStyle([
+            ('GRID', (0,0), (-1,-1), 0.5, colors.black),
+            ('VALIGN', (0,0), (-1,-1), 'TOP'),
+            ('BACKGROUND', (0,0), (-1,0), colors.lightgrey),
+            ('FONTNAME', (0,0), (-1,-1), font_name),
+        ]))
+        elements.append(table)
+        elements.append(Spacer(1, 20))
+
+    doc.build(elements)
+    buffer.seek(0)
+    return buffer
+
+def generate_visual_excel(df):
+    wb = Workbook()
+    wb.remove(wb.active)
+    thin = Border(left=Side(style='thin'), right=Side(style='thin'), top=Side(style='thin'), bottom=Side(style='thin'))
+    align = Alignment(horizontal="center", vertical="top", wrap_text=True)
+    import calendar as py_calendar
+    cal = py_calendar.Calendar(firstweekday=6)
+    
+    df['dt'] = pd.to_datetime(df['Date'] + " " + df['Time'], errors='coerce')
+    months = sorted(df['dt'].dt.to_period('M').dropna().unique())
+
+    for period in months:
+        ws = wb.create_sheet(f"{period.year}-{period.month:02d}")
+        ws.merge_cells("A1:G1")
+        ws["A1"] = f"{period.strftime('%B %Y')}"
+        ws["A1"].font = Font(size=14, bold=True)
+        ws["A1"].alignment = Alignment(horizontal="center")
+        
+        for i, d in enumerate(["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"], 1):
+            c = ws.cell(2, i, d)
+            c.fill = PatternFill("solid", fgColor="DDDDDD")
+            c.font = Font(bold=True)
+            c.alignment = Alignment(horizontal="center")
+            ws.column_dimensions[chr(64+i)].width = 20
+
+        row_num = 3
+        for week in cal.monthdayscalendar(period.year, period.month):
+            max_h = 1
+            for col_idx, day in enumerate(week, 1):
+                c = ws.cell(row_num, col_idx)
+                c.border = thin
+                c.alignment = align
+                if day != 0:
+                    day_str = f"{period.year}-{period.month:02d}-{day:02d}"
+                    day_data = df[df['Date'] == day_str].sort_values('Time')
+                    val = f"{day}\n"
+                    if not day_data.empty:
+                        lines = [f"{r['Name']} ({r['Time']})" for _, r in day_data.iterrows()]
+                        val += "\n".join(lines)
+                        max_h = max(max_h, len(lines)+1)
+                    c.value = val
+            ws.row_dimensions[row_num].height = max(50, max_h * 15)
+            row_num += 1
+            
+    buffer = io.BytesIO()
+    wb.save(buffer)
+    buffer.seek(0)
+    return buffer
+
+# ================= MAIN APP LOGIC =================
+initialize_session()
+df = st.session_state.data
+
+st.title("🕒 Cloud Interview Scheduler（多人協作優化版）")
+
+if not df.empty and 'LastUpdated' in df.columns:
+    max_ts = df['LastUpdated'].max()
+    if pd.notna(max_ts):
+        st.caption(f"📅 資料最後更新時間：{max_ts.strftime('%Y-%m-%d %H:%M:%S')}")
+
+st.warning("⚠️ **多人同時編輯時，請先點「🔄 Force Sync」確認最新資料，避免互相覆蓋！**")
+
+if st.button("🔄 Force Sync from Cloud"):
+    refresh_data(force=True)
+
+tab1, tab2, tab3 = st.tabs(["📅 Calendar View", "📝 List & Edit", "⚙️ Export & Import"])
+
+# --- TAB 1: CALENDAR ---
+with tab1:
+    if not df.empty:
+        df_cal = df.reset_index(drop=True)
+        events = []
+        for index, row in df_cal.iterrows():
+            if row['Date'] and row['Time'] and len(str(row['Date'])) > 0 and len(str(row['Time'])) > 0:
+                try:
+                    start_iso = f"{row['Date']}T{row['Time']}"
+                    events.append({
+                        "id": str(index),
+                        "title": row['Name'],
+                        "start": start_iso,
+                        "extendedProps": {"description": f"ID: {row['ID']} | Notes: {row['Notes']}"}
+                    })
+                except:
+                    continue
+        
+        calendar(events=events, options={
+            "initialView": "dayGridMonth",
+            "height": "750px",
+            "headerToolbar": {"left": "prev,next today", "center": "title", "right": "dayGridMonth,listMonth"},
+            "eventTimeFormat": {"hour": "2-digit", "minute": "2-digit", "hour12": False}
+        }, key="main_calendar")
+    else:
+        st.info("No data available.")
+
+# --- TAB 2: EDIT ---
+with tab2:
+    c1, c2 = st.columns([1, 2])
+    with c1:
+        st.subheader("Add Booking")
+        
+        limit = st.number_input("Max People per Slot (0 = Unlimited)", min_value=0, value=0)
+
+        with st.form("add", clear_on_submit=False):
+            form_id = st.session_state.form_id
+            name = st.text_input("Name", key=f"name_{form_id}")
+            c_id = st.text_input("ID", key=f"id_{form_id}")
+            d = st.date_input("Date", min_value=datetime.today(), key=f"date_{form_id}")
+            t_str = st.selectbox("Time", TIME_SLOTS, key=f"time_{form_id}")
+            notes = st.text_area("Notes", key=f"notes_{form_id}")
+            
+            if st.form_submit_button("Save"):
+                if not name:
+                    st.error("Name required")
+                else:
+                    limit_reached = False
+                    if limit > 0:
+                        check_date = d.strftime("%Y-%m-%d")
+                        existing_count = len(df[(df['Date'] == check_date) & (df['Time'] == t_str)])
+                        if existing_count >= limit:
+                            limit_reached = True
+                            st.error(f"⛔ Slot {check_date} {t_str} is FULL! ({existing_count}/{limit})")
+                    
+                    if not limit_reached:
+                        new_row = pd.DataFrame([{
+                            "Name": name, "ID": c_id, "Date": d.strftime("%Y-%m-%d"),
+                            "Time": t_str, "Notes": notes, "LastUpdated": pd.NaT
+                        }])
+                        new_df = pd.concat([df, new_row], ignore_index=True)
+                        save_with_conflict_detection(new_df)
+                        st.session_state.form_id += 1
+
+    with c2:
+        st.subheader("Edit Grid")
+        st.caption("Double-click to edit. Select rows & Delete key to remove.")
+        
+        edit_in = df.copy()
+        edit_in["Date"] = pd.to_datetime(edit_in["Date"], errors='coerce').dt.date
+        edit_in["Time"] = pd.to_datetime(edit_in["Time"], format='%H:%M', errors='coerce').dt.time
+        
+        out = st.data_editor(
+            edit_in,
+            num_rows="dynamic",
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Time": st.column_config.TimeColumn("Time", format="HH:mm", step=1800),
+                "LastUpdated": None  # 隱藏
+            }
+        )
+        
+        if st.button("💾 Save Changes to Cloud", type="primary"):
+            clean_out = out.copy()
+            clean_out['Date'] = clean_out['Date'].apply(lambda x: x.strftime('%Y-%m-%d') if pd.notna(x) else '')
+            clean_out['Time'] = clean_out['Time'].apply(lambda x: x.strftime('%H:%M') if pd.notna(x) else '')
+            save_with_conflict_detection(clean_out)
+
+# --- TAB 3: EXPORT ---
+with tab3:
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("### Visual Reports")
+        st.write("If Chinese characters are missing in PDF, make sure `font.ttf` is uploaded.")
+        if not df.empty:
+            st.download_button("📄 PDF Calendar", generate_visual_pdf(df), "cal.pdf", "application/pdf")
+            st.download_button("📊 Excel Calendar", generate_visual_excel(df), "cal.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    
+    with col2:
+        st.markdown("### Import Backup")
+        up = st.file_uploader("CSV", type="csv")
+        if up and st.button("Import"):
+            try:
+                imp = pd.read_csv(up).fillna("")
+                if 'Name' in imp.columns:
+                    # 匯入時也加上 LastUpdated
+                    imp['LastUpdated'] = pd.NaT
+                    save_with_conflict_detection(pd.concat([df, imp], ignore_index=True))
+                    st.success("Imported!")
+                    st.rerun()
+            except:
+                st.error("Invalid CSV")

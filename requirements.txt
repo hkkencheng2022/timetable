@@ -1,0 +1,6 @@
+streamlit
+pandas
+st-gsheets-connection
+streamlit-calendar
+reportlab
+openpyxl
