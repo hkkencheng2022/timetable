@@ -27,23 +27,35 @@ for h in range(9, 24):  # 9 to 23
     for m in (0, 30):
         TIME_SLOTS.append(f"{h:02d}:{m:02d}")
 
-# 科目清單 (Subject List)
+# 科目清單
 SUBJECT_OPTIONS = ["中文", "英文", "數學", "生物", "地理", "中史", "歷史", "物理", "化學"]
 
 # ================= DATA FUNCTIONS =================
 def clean_dataframe(df):
+    """清理資料並標準化格式"""
+    # 轉為字串以處理 NaN
     df = df.astype(str)
+    
+    # 清理無效字串
     for col in df.columns:
         if col not in ['LastUpdated']:
             df[col] = df[col].replace(['NaT', 'nan', 'None', '<NA>'], '')
+            
+    # 處理日期格式
     df['Date'] = pd.to_datetime(df['Date'], errors='coerce').dt.strftime('%Y-%m-%d')
+    
+    # 處理時間格式 (相容 HH:MM:SS 與 HH:MM)
     df['Time'] = pd.to_datetime(df['Time'], format='%H:%M:00', errors='coerce').fillna(
                  pd.to_datetime(df['Time'], format='%H:%M', errors='coerce')
                  ).dt.strftime('%H:%M')
+                 
     df = df.fillna("")
+    
+    # 處理 LastUpdated
     if 'LastUpdated' not in df.columns:
         df['LastUpdated'] = pd.NaT
     df['LastUpdated'] = pd.to_datetime(df['LastUpdated'], errors='coerce')
+    
     return df
 
 def load_data_from_google():
@@ -63,14 +75,18 @@ def initialize_session():
     if 'data' not in st.session_state:
         with st.spinner("🔄 Connecting to Cloud Database..."):
             st.session_state.data = load_data_from_google()
-        st.rerun()
     
     if 'form_id' not in st.session_state:
         st.session_state.form_id = 0
     if 'last_cloud_timestamp' not in st.session_state:
-        st.session_state.last_cloud_timestamp = None
+        # 嘗試從目前資料獲取最新時間戳記
+        if not st.session_state.data.empty and 'LastUpdated' in st.session_state.data.columns:
+             st.session_state.last_cloud_timestamp = st.session_state.data['LastUpdated'].max()
+        else:
+             st.session_state.last_cloud_timestamp = None
 
 def refresh_data(force=False):
+    st.cache_data.clear()  # 清除可能的緩存
     new_data = load_data_from_google()
     st.session_state.data = new_data
     if not new_data.empty and 'LastUpdated' in new_data.columns:
@@ -83,39 +99,65 @@ def refresh_data(force=False):
 # ================= CONFLICT DETECTION & SAVE =================
 def save_with_conflict_detection(new_df):
     try:
+        # 1. 重新讀取雲端最新資料以進行比對
         latest_cloud = load_data_from_google()
-        cloud_latest_ts = latest_cloud['LastUpdated'].max() if not latest_cloud.empty else pd.NaT
-        user_latest_ts = st.session_state.last_cloud_timestamp
-        current_time = pd.Timestamp.now()
         
+        # 2. 獲取時間戳記並移除時區 (tz_localize(None)) 以避免比對錯誤
+        cloud_latest_ts = pd.NaT
+        if not latest_cloud.empty and 'LastUpdated' in latest_cloud.columns:
+            cloud_latest_ts = latest_cloud['LastUpdated'].max()
+            if pd.notna(cloud_latest_ts):
+                cloud_latest_ts = cloud_latest_ts.tz_localize(None)
+
+        user_latest_ts = st.session_state.last_cloud_timestamp
+        if pd.notna(user_latest_ts):
+            user_latest_ts = user_latest_ts.tz_localize(None)
+
+        # 3. 衝突檢測邏輯
+        # 只有當雲端時間確實大於本地時間，才視為衝突
         if pd.notna(user_latest_ts) and pd.notna(cloud_latest_ts) and cloud_latest_ts > user_latest_ts:
-            st.error("⚠️ Detected external changes!")
-            st.write("Cloud Last Update:", cloud_latest_ts)
-            st.write("Your Load Time:", user_latest_ts)
+            st.error("⚠️ 儲存失敗：檢測到雲端資料已被其他人修改！")
+            st.write(f"雲端最新: {cloud_latest_ts}")
+            st.write(f"本地基準: {user_latest_ts}")
             
             col1, col2 = st.columns(2)
-            if col1.button("🔄 Discard my changes & Reload"):
+            if col1.button("🔄 放棄修改並重新載入"):
                 refresh_data(force=True)
                 return
-            if col2.button("⚠️ Force Overwrite (Risk losing others' data)", type="primary"):
-                pass  # Continue to save
+            if col2.button("⚠️ 強制覆蓋 (可能遺失他人修改)", type="primary"):
+                pass  # 繼續執行儲存
             else:
-                st.stop()
+                st.stop() # 停止執行，等待使用者選擇
         
-        clean_df = clean_dataframe(new_df.copy())
+        # 4. 準備儲存的資料
+        current_time = pd.Timestamp.now()
+        
+        # [關鍵修正]：刪除資料後，必須重置 Index，否則 GSheets 可能無法正確覆蓋舊資料
+        clean_df = clean_dataframe(new_df.copy()).reset_index(drop=True)
+        
+        # 更新 LastUpdated
         clean_df['LastUpdated'] = current_time
         
-        conn.update(worksheet="Sheet1", data=clean_df)
+        # [關鍵修正]：將 LastUpdated 轉為字串再上傳，確保格式固定，避免 GSheets 識別錯誤
+        upload_df = clean_df.copy()
+        upload_df['LastUpdated'] = upload_df['LastUpdated'].dt.strftime('%Y-%m-%d %H:%M:%S')
+
+        # 5. 執行更新
+        conn.update(worksheet="Sheet1", data=upload_df)
+        
+        # 6. 更新 Session State
         st.session_state.data = clean_df
         st.session_state.last_cloud_timestamp = current_time
-        st.success("✅ Saved successfully!")
+        
+        st.success("✅ 儲存成功！雲端資料已更新。")
         st.rerun()
         
     except Exception as e:
         if "429" in str(e):
-            st.error("⚠️ Save failed: Too many requests. Wait 60 seconds and try again.")
+            st.error("⚠️ 儲存失敗：請求過多，請等待 60 秒後再試。")
         else:
-            st.error(f"Save failed: {e}")
+            st.error(f"儲存失敗：{e}")
+            st.write("詳細錯誤資訊：", str(e))
 
 # ================= EXPORT FUNCTIONS =================
 def generate_visual_pdf(df):
