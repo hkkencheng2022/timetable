@@ -79,14 +79,13 @@ def initialize_session():
     if 'form_id' not in st.session_state:
         st.session_state.form_id = 0
     if 'last_cloud_timestamp' not in st.session_state:
-        # 嘗試從目前資料獲取最新時間戳記
         if not st.session_state.data.empty and 'LastUpdated' in st.session_state.data.columns:
              st.session_state.last_cloud_timestamp = st.session_state.data['LastUpdated'].max()
         else:
              st.session_state.last_cloud_timestamp = None
 
 def refresh_data(force=False):
-    st.cache_data.clear()  # 清除可能的緩存
+    st.cache_data.clear()
     new_data = load_data_from_google()
     st.session_state.data = new_data
     if not new_data.empty and 'LastUpdated' in new_data.columns:
@@ -99,10 +98,8 @@ def refresh_data(force=False):
 # ================= CONFLICT DETECTION & SAVE =================
 def save_with_conflict_detection(new_df):
     try:
-        # 1. 重新讀取雲端最新資料以進行比對
         latest_cloud = load_data_from_google()
         
-        # 2. 獲取時間戳記並移除時區 (tz_localize(None)) 以避免比對錯誤
         cloud_latest_ts = pd.NaT
         if not latest_cloud.empty and 'LastUpdated' in latest_cloud.columns:
             cloud_latest_ts = latest_cloud['LastUpdated'].max()
@@ -113,8 +110,6 @@ def save_with_conflict_detection(new_df):
         if pd.notna(user_latest_ts):
             user_latest_ts = user_latest_ts.tz_localize(None)
 
-        # 3. 衝突檢測邏輯
-        # 只有當雲端時間確實大於本地時間，才視為衝突
         if pd.notna(user_latest_ts) and pd.notna(cloud_latest_ts) and cloud_latest_ts > user_latest_ts:
             st.error("⚠️ 儲存失敗：檢測到雲端資料已被其他人修改！")
             st.write(f"雲端最新: {cloud_latest_ts}")
@@ -125,27 +120,23 @@ def save_with_conflict_detection(new_df):
                 refresh_data(force=True)
                 return
             if col2.button("⚠️ 強制覆蓋 (可能遺失他人修改)", type="primary"):
-                pass  # 繼續執行儲存
+                pass
             else:
-                st.stop() # 停止執行，等待使用者選擇
+                st.stop()
         
-        # 4. 準備儲存的資料
         current_time = pd.Timestamp.now()
         
-        # [關鍵修正]：刪除資料後，必須重置 Index，否則 GSheets 可能無法正確覆蓋舊資料
+        # 重置索引
         clean_df = clean_dataframe(new_df.copy()).reset_index(drop=True)
         
-        # 更新 LastUpdated
         clean_df['LastUpdated'] = current_time
         
-        # [關鍵修正]：將 LastUpdated 轉為字串再上傳，確保格式固定，避免 GSheets 識別錯誤
+        # 轉換為字串以上傳
         upload_df = clean_df.copy()
         upload_df['LastUpdated'] = upload_df['LastUpdated'].dt.strftime('%Y-%m-%d %H:%M:%S')
 
-        # 5. 執行更新
         conn.update(worksheet="Sheet1", data=upload_df)
         
-        # 6. 更新 Session State
         st.session_state.data = clean_df
         st.session_state.last_cloud_timestamp = current_time
         
@@ -389,8 +380,14 @@ with tab2:
         
         if st.button("💾 Save Changes to Cloud", type="primary"):
             clean_out = out.copy()
-            clean_out['Date'] = clean_out['Date'].apply(lambda x: x.strftime('%Y-%m-%d') if pd.notna(x) else '')
-            clean_out['Time'] = clean_out['Time'].apply(lambda x: x.strftime('%H:%M') if pd.notna(x) else '')
+            # 修正：安全的日期轉換
+            clean_out['Date'] = clean_out['Date'].apply(
+                lambda x: x.strftime('%Y-%m-%d') if hasattr(x, 'strftime') else (str(x) if pd.notna(x) and str(x) != 'NaT' else '')
+            )
+            # 修正：安全的時間轉換
+            clean_out['Time'] = clean_out['Time'].apply(
+                lambda x: x.strftime('%H:%M') if hasattr(x, 'strftime') else (str(x) if pd.notna(x) and str(x) != 'NaT' else '')
+            )
             save_with_conflict_detection(clean_out)
 
 # --- TAB 3: EXPORT ---
