@@ -380,13 +380,12 @@ with tab2:
         
         if st.button("💾 Save Changes to Cloud", type="primary"):
             clean_out = out.copy()
-            # 修正：安全的日期轉換
+            # 修正：確保在呼叫 strftime 前檢查是否為 NaT
             clean_out['Date'] = clean_out['Date'].apply(
-                lambda x: x.strftime('%Y-%m-%d') if hasattr(x, 'strftime') else (str(x) if pd.notna(x) and str(x) != 'NaT' else '')
+                lambda x: x.strftime('%Y-%m-%d') if pd.notna(x) and hasattr(x, 'strftime') else (str(x) if pd.notna(x) and str(x) != 'NaT' else '')
             )
-            # 修正：安全的時間轉換
             clean_out['Time'] = clean_out['Time'].apply(
-                lambda x: x.strftime('%H:%M') if hasattr(x, 'strftime') else (str(x) if pd.notna(x) and str(x) != 'NaT' else '')
+                lambda x: x.strftime('%H:%M') if pd.notna(x) and hasattr(x, 'strftime') else (str(x) if pd.notna(x) and str(x) != 'NaT' else '')
             )
             save_with_conflict_detection(clean_out)
 
